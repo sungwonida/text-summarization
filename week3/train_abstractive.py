@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
+from contextlib import contextmanager
+
 import numpy as np
 import torch
 from datasets import DatasetDict, load_dataset
@@ -138,6 +140,14 @@ def parse_args() -> argparse.Namespace:
         help="Number of steps between logging updates.",
     )
     parser.add_argument(
+        "--logging-dir",
+        default=None,
+        help=(
+            "Directory where framework-specific loggers (e.g., TensorBoard) will write events. "
+            "Defaults to <output-dir>/runs when TensorBoard logging is enabled."
+        ),
+    )
+    parser.add_argument(
         "--evaluation-strategy",
         default="epoch",
         choices=["no", "steps", "epoch"],
@@ -154,6 +164,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Number of update steps to accumulate before performing a backward pass.",
+    )
+    parser.add_argument(
+        "--report-to",
+        nargs="+",
+        default=["tensorboard"],
+        help=(
+            "Integration targets for Hugging Face Trainer logging. Use 'tensorboard' to enable TensorBoard "
+            "logging (requires the tensorboard package) or 'none' to disable external logging."
+        ),
     )
     parser.add_argument(
         "--max-train-samples",
@@ -203,6 +222,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.val_max_target_length is None:
         args.val_max_target_length = args.max_target_length
+    args.report_to = normalize_report_to(args.report_to)
     return args
 
 
@@ -313,7 +333,7 @@ def postprocess_text(preds: Iterable[str], labels: Iterable[str]) -> Tuple[List[
     labels = [label.strip() for label in labels]
     return preds, labels
 
-  
+
 def build_training_arguments(args: argparse.Namespace, output_dir: Path) -> Seq2SeqTrainingArguments:
     """Create ``Seq2SeqTrainingArguments`` while remaining compatible with multiple versions."""
 
@@ -331,9 +351,12 @@ def build_training_arguments(args: argparse.Namespace, output_dir: Path) -> Seq2
         "generation_max_length": args.val_max_target_length,
         "generation_num_beams": args.generation_num_beams,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
-        "report_to": ["none"],
+        "report_to": args.report_to,
         "seed": args.seed,
     }
+
+    if args.logging_dir is not None:
+        base_kwargs["logging_dir"] = args.logging_dir
 
     signature = inspect.signature(Seq2SeqTrainingArguments.__init__)
     valid_params = set(signature.parameters.keys())
@@ -381,6 +404,44 @@ def build_training_arguments(args: argparse.Namespace, output_dir: Path) -> Seq2
 
     return Seq2SeqTrainingArguments(**filtered_kwargs)
 
+
+def normalize_report_to(report_to: Iterable[str]) -> List[str]:
+    normalized = [entry.lower() for entry in report_to if entry]
+    if "none" in normalized and len(normalized) > 1:
+        LOGGER.warning("Ignoring 'none' in --report-to because other integrations were provided.")
+        normalized = [entry for entry in normalized if entry != "none"]
+    if not normalized:
+        return ["none"]
+    return normalized
+
+
+def should_enable_tensorboard(report_to: Iterable[str]) -> bool:
+    return any(entry == "tensorboard" for entry in report_to)
+
+
+@contextmanager
+def tensorboard_writer_context(args: argparse.Namespace, output_dir: Path):
+    if not should_enable_tensorboard(args.report_to):
+        yield None
+        return
+
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError as exc:  # pragma: no cover - defensive guard
+        raise RuntimeError(
+            "TensorBoard logging requested but tensorboard is not installed. Install it or pass --report-to none."
+        ) from exc
+
+    log_dir = Path(args.logging_dir) if args.logging_dir else output_dir / "runs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("TensorBoard logs will be written to %s", log_dir)
+    writer = SummaryWriter(log_dir=str(log_dir))
+    try:
+        yield writer
+    finally:
+        writer.flush()
+        writer.close()
+
   
 def main():
     configure_logging()
@@ -388,6 +449,12 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if should_enable_tensorboard(args.report_to):
+        log_dir = Path(args.logging_dir) if args.logging_dir else output_dir / "runs"
+        args.logging_dir = str(log_dir)
+    elif args.logging_dir is not None:
+        args.logging_dir = str(Path(args.logging_dir))
 
     device = get_device()
     torch.manual_seed(args.seed)
@@ -451,109 +518,144 @@ def main():
         return {k: round(v, 4) for k, v in result.items()}
 
 
-    training_args = build_training_arguments(args, output_dir)
+    with tensorboard_writer_context(args, output_dir) as summary_writer:
+        training_args = build_training_arguments(args, output_dir)
 
-    trainer = Seq2SeqTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized_datasets.get("train"),
-        eval_dataset=tokenized_datasets.get("validation") or tokenized_datasets.get("test"),
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics if args.predict_with_generate else None,
-    )
-
-    if tokenized_datasets.get("train") is not None:
-        LOGGER.info("Starting training")
-        trainer.train()
-    else:
-        LOGGER.warning("No training split found; skipping training")
-
-    LOGGER.info("Saving model and tokenizer to %s", output_dir)
-    trainer.save_model()
-    tokenizer.save_pretrained(output_dir)
-
-    eval_split = tokenized_datasets.get("validation") or tokenized_datasets.get("test")
-    eval_metrics: Dict[str, float] | None = None
-    if eval_split is not None:
-        LOGGER.info("Running evaluation")
-        eval_metrics = trainer.evaluate(eval_dataset=eval_split, max_length=args.val_max_target_length)
-        LOGGER.info("Evaluation metrics: %s", eval_metrics)
-    else:
-        LOGGER.warning("No evaluation split found; skipping evaluation")
-
-    LOGGER.info("Computing lead-%d baseline", args.baseline_sentences)
-    baseline_scores = None
-    if eval_split is not None:
-        original_eval_split = raw_datasets.get("validation") or raw_datasets.get("test")
-        if args.max_eval_samples:
-            original_eval_split = original_eval_split.select(
-                range(min(args.max_eval_samples, len(original_eval_split)))
-            )
-        baseline_scores = compute_lead_baseline(
-            original_eval_split,
-            text_column=columns.text_column,
-            summary_column=columns.summary_column,
-            num_sentences=args.baseline_sentences,
+        trainer = Seq2SeqTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=tokenized_datasets.get("train"),
+            eval_dataset=tokenized_datasets.get("validation") or tokenized_datasets.get("test"),
+            tokenizer=tokenizer,
+            data_collator=data_collator,
+            compute_metrics=compute_metrics if args.predict_with_generate else None,
         )
-        LOGGER.info("Lead-%d baseline scores: %s", args.baseline_sentences, baseline_scores)
 
-    qualitative_samples: List[Dict[str, str]] = []
-    if eval_split is not None:
-        LOGGER.info("Generating qualitative samples")
-        eval_dataset_for_samples = raw_datasets.get("test") or raw_datasets.get("validation")
-        if eval_dataset_for_samples is not None:
-            if args.max_eval_samples:
-                eval_dataset_for_samples = eval_dataset_for_samples.select(
-                    range(min(args.max_eval_samples, len(eval_dataset_for_samples)))
-                )
-            sample_indices = list(range(min(args.num_samples_for_report, len(eval_dataset_for_samples))))
-            for idx in sample_indices:
-                record = eval_dataset_for_samples[idx]
-                input_text = record[columns.text_column]
-                reference_summary = record[columns.summary_column]
-                inputs = tokenizer(
-                    input_text,
-                    return_tensors="pt",
-                    max_length=args.max_source_length,
-                    truncation=True,
-                )
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-                with torch.no_grad():
-                    generated_ids = model.generate(
-                        **inputs,
-                        max_length=args.val_max_target_length,
-                        num_beams=args.generation_num_beams,
-                    )
-                predicted_summary = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-                qualitative_samples.append(
+        if summary_writer is not None:
+            summary_writer.add_text(
+                "config/dataset",
+                json.dumps(
                     {
-                        "article": input_text,
-                        "reference_summary": reference_summary,
-                        "model_summary": predicted_summary,
-                    }
+                        "name": args.dataset_name,
+                        "config": args.dataset_config,
+                        "text_column": columns.text_column,
+                        "summary_column": columns.summary_column,
+                        "max_train_samples": args.max_train_samples,
+                        "max_eval_samples": args.max_eval_samples,
+                    },
+                    indent=2,
+                ),
+                global_step=0,
+            )
+
+        if tokenized_datasets.get("train") is not None:
+            LOGGER.info("Starting training")
+            trainer.train()
+        else:
+            LOGGER.warning("No training split found; skipping training")
+
+        LOGGER.info("Saving model and tokenizer to %s", output_dir)
+        trainer.save_model()
+        tokenizer.save_pretrained(output_dir)
+
+        eval_split = tokenized_datasets.get("validation") or tokenized_datasets.get("test")
+        eval_metrics: Dict[str, float] | None = None
+        if eval_split is not None:
+            LOGGER.info("Running evaluation")
+            eval_metrics = trainer.evaluate(eval_dataset=eval_split, max_length=args.val_max_target_length)
+            LOGGER.info("Evaluation metrics: %s", eval_metrics)
+        else:
+            LOGGER.warning("No evaluation split found; skipping evaluation")
+
+        LOGGER.info("Computing lead-%d baseline", args.baseline_sentences)
+        baseline_scores = None
+        if eval_split is not None:
+            original_eval_split = raw_datasets.get("validation") or raw_datasets.get("test")
+            if args.max_eval_samples:
+                original_eval_split = original_eval_split.select(
+                    range(min(args.max_eval_samples, len(original_eval_split)))
+                )
+            baseline_scores = compute_lead_baseline(
+                original_eval_split,
+                text_column=columns.text_column,
+                summary_column=columns.summary_column,
+                num_sentences=args.baseline_sentences,
+            )
+            LOGGER.info("Lead-%d baseline scores: %s", args.baseline_sentences, baseline_scores)
+
+        qualitative_samples: List[Dict[str, str]] = []
+        if eval_split is not None:
+            LOGGER.info("Generating qualitative samples")
+            eval_dataset_for_samples = raw_datasets.get("test") or raw_datasets.get("validation")
+            if eval_dataset_for_samples is not None:
+                if args.max_eval_samples:
+                    eval_dataset_for_samples = eval_dataset_for_samples.select(
+                        range(min(args.max_eval_samples, len(eval_dataset_for_samples)))
+                    )
+                sample_indices = list(range(min(args.num_samples_for_report, len(eval_dataset_for_samples))))
+                for idx in sample_indices:
+                    record = eval_dataset_for_samples[idx]
+                    input_text = record[columns.text_column]
+                    reference_summary = record[columns.summary_column]
+                    inputs = tokenizer(
+                        input_text,
+                        return_tensors="pt",
+                        max_length=args.max_source_length,
+                        truncation=True,
+                    )
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+                    with torch.no_grad():
+                        generated_ids = model.generate(
+                            **inputs,
+                            max_length=args.val_max_target_length,
+                            num_beams=args.generation_num_beams,
+                        )
+                    predicted_summary = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+                    qualitative_samples.append(
+                        {
+                            "article": input_text,
+                            "reference_summary": reference_summary,
+                            "model_summary": predicted_summary,
+                        }
+                    )
+
+        if summary_writer is not None:
+            global_step = getattr(trainer.state, "global_step", 0)
+            if eval_metrics:
+                for key, value in eval_metrics.items():
+                    if isinstance(value, (int, float)):
+                        summary_writer.add_scalar(f"eval/{key}", value, global_step=global_step)
+            if baseline_scores:
+                for key, value in baseline_scores.items():
+                    if isinstance(value, (int, float)):
+                        summary_writer.add_scalar(f"baseline/{key}", value, global_step=global_step)
+            for idx, sample in enumerate(qualitative_samples):
+                summary_writer.add_text(
+                    f"samples/{idx}",
+                    json.dumps(sample, indent=2),
+                    global_step=global_step,
                 )
 
-    report = {
-        "dataset": {
-            "name": args.dataset_name,
-            "config": args.dataset_config,
-            "text_column": columns.text_column,
-            "summary_column": columns.summary_column,
-            "max_train_samples": args.max_train_samples,
-            "max_eval_samples": args.max_eval_samples,
-        },
-        "model": args.model_name,
-        "training_args": vars(args),
-        "evaluation": eval_metrics,
-        "baseline": baseline_scores,
-        "samples": qualitative_samples,
-    }
+        report = {
+            "dataset": {
+                "name": args.dataset_name,
+                "config": args.dataset_config,
+                "text_column": columns.text_column,
+                "summary_column": columns.summary_column,
+                "max_train_samples": args.max_train_samples,
+                "max_eval_samples": args.max_eval_samples,
+            },
+            "model": args.model_name,
+            "training_args": vars(args),
+            "evaluation": eval_metrics,
+            "baseline": baseline_scores,
+            "samples": qualitative_samples,
+        }
 
-    report_path = output_dir / "evaluation_report.json"
-    LOGGER.info("Writing evaluation report to %s", report_path)
-    with report_path.open("w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
+        report_path = output_dir / "evaluation_report.json"
+        LOGGER.info("Writing evaluation report to %s", report_path)
+        with report_path.open("w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
 
 
 if __name__ == "__main__":
