@@ -313,7 +313,7 @@ def postprocess_text(preds: Iterable[str], labels: Iterable[str]) -> Tuple[List[
     labels = [label.strip() for label in labels]
     return preds, labels
 
-
+  
 def build_training_arguments(args: argparse.Namespace, output_dir: Path) -> Seq2SeqTrainingArguments:
     """Create ``Seq2SeqTrainingArguments`` while remaining compatible with multiple versions."""
 
@@ -381,7 +381,7 @@ def build_training_arguments(args: argparse.Namespace, output_dir: Path) -> Seq2
 
     return Seq2SeqTrainingArguments(**filtered_kwargs)
 
-
+  
 def main():
     configure_logging()
     args = parse_args()
@@ -449,6 +449,7 @@ def main():
         prediction_lens = [np.count_nonzero(pred != tokenizer.pad_token_id) for pred in predictions]
         result["gen_len"] = sum(prediction_lens) / len(prediction_lens)
         return {k: round(v, 4) for k, v in result.items()}
+
 
     training_args = build_training_arguments(args, output_dir)
 
