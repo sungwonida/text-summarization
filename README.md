@@ -10,6 +10,7 @@ The Week 3 goal is to fine-tune a sequence-to-sequence transformer (default: `ss
 - Automatic dataset column inference for common summarization datasets.
 - ROUGE-based evaluation through Hugging Face `evaluate` and an extractive **lead-3 baseline** for comparison.
 - JSON evaluation report capturing metrics, configuration, and qualitative samples.
+- Optional TensorBoard logging for training/evaluation metrics and qualitative samples.
 
 ### Environment setup
 
@@ -32,6 +33,16 @@ python week3/train_abstractive.py \
 ```
 
 The command above downloads the CNN/DailyMail dataset, fine-tunes the baseline model, evaluates it, and produces an `evaluation_report.json` file inside `outputs/week3/`.  Use `--max-train-samples` and `--max-eval-samples` for quick smoke tests on limited hardware (for example, `--max-train-samples 2000 --max-eval-samples 500`).
+
+### TensorBoard logging
+
+TensorBoard logging is enabled by default through Hugging Face's Trainer integration. Run TensorBoard in a separate shell to monitor loss curves, ROUGE scores, and qualitative samples:
+
+```bash
+tensorboard --logdir outputs/week3/runs
+```
+
+Use `--logging-dir` to customize the event directory and `--report-to none` to disable the integration entirely.
 
 ### Output artifacts
 
