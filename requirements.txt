@@ -1,0 +1,8 @@
+torch>=2.1.0
+transformers>=4.36.0
+datasets>=2.14.0
+evaluate>=0.4.0
+accelerate>=0.21.0
+sentencepiece>=0.1.99
+rouge-score>=0.1.2
+numpy>=1.23
