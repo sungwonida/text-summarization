@@ -13,6 +13,7 @@ libraries, PyTorch, and Evaluate.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import logging
 import re
@@ -312,7 +313,75 @@ def postprocess_text(preds: Iterable[str], labels: Iterable[str]) -> Tuple[List[
     labels = [label.strip() for label in labels]
     return preds, labels
 
+  
+def build_training_arguments(args: argparse.Namespace, output_dir: Path) -> Seq2SeqTrainingArguments:
+    """Create ``Seq2SeqTrainingArguments`` while remaining compatible with multiple versions."""
 
+    base_kwargs = {
+        "output_dir": str(output_dir),
+        "overwrite_output_dir": True,
+        "learning_rate": args.learning_rate,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "weight_decay": args.weight_decay,
+        "warmup_steps": args.warmup_steps,
+        "logging_steps": args.logging_steps,
+        "num_train_epochs": args.num_train_epochs,
+        "predict_with_generate": args.predict_with_generate,
+        "generation_max_length": args.val_max_target_length,
+        "generation_num_beams": args.generation_num_beams,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "report_to": ["none"],
+        "seed": args.seed,
+    }
+
+    signature = inspect.signature(Seq2SeqTrainingArguments.__init__)
+    valid_params = set(signature.parameters.keys())
+
+    filtered_kwargs: Dict[str, object] = {}
+    skipped_keys: List[str] = []
+
+    for key, value in base_kwargs.items():
+        if key in valid_params:
+            filtered_kwargs[key] = value
+        else:
+            skipped_keys.append(key)
+
+    for skipped in skipped_keys:
+        LOGGER.warning("Dropping unsupported Seq2SeqTrainingArguments option '%s'", skipped)
+
+    eval_value = args.evaluation_strategy
+    if "evaluation_strategy" in valid_params:
+        filtered_kwargs["evaluation_strategy"] = eval_value
+    elif "eval_strategy" in valid_params:
+        filtered_kwargs["eval_strategy"] = eval_value
+    elif "evaluate_during_training" in valid_params:
+        filtered_kwargs["evaluate_during_training"] = eval_value != "no"
+        if eval_value == "steps" and "eval_steps" in valid_params:
+            filtered_kwargs["eval_steps"] = max(1, args.logging_steps)
+    elif eval_value != "no":
+        LOGGER.warning(
+            "Seq2SeqTrainingArguments version does not support evaluation strategy; "
+            "evaluation during training will be disabled."
+        )
+
+    save_value = args.save_strategy
+    if "save_strategy" in valid_params:
+        filtered_kwargs["save_strategy"] = save_value
+    elif save_value != "no" and "save_steps" in valid_params:
+        filtered_kwargs["save_steps"] = max(1, args.logging_steps)
+    elif save_value != "no":
+        LOGGER.warning(
+            "Seq2SeqTrainingArguments version does not support save strategy; "
+            "default checkpointing behavior will be used."
+        )
+
+    if "report_to" not in valid_params and "report_to" in filtered_kwargs:
+        filtered_kwargs.pop("report_to", None)
+
+    return Seq2SeqTrainingArguments(**filtered_kwargs)
+
+  
 def main():
     configure_logging()
     args = parse_args()
@@ -381,25 +450,8 @@ def main():
         result["gen_len"] = sum(prediction_lens) / len(prediction_lens)
         return {k: round(v, 4) for k, v in result.items()}
 
-    training_args = Seq2SeqTrainingArguments(
-        output_dir=str(output_dir),
-        overwrite_output_dir=True,
-        evaluation_strategy=args.evaluation_strategy,
-        save_strategy=args.save_strategy,
-        learning_rate=args.learning_rate,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        weight_decay=args.weight_decay,
-        warmup_steps=args.warmup_steps,
-        logging_steps=args.logging_steps,
-        num_train_epochs=args.num_train_epochs,
-        predict_with_generate=args.predict_with_generate,
-        generation_max_length=args.val_max_target_length,
-        generation_num_beams=args.generation_num_beams,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        report_to=["none"],
-        seed=args.seed,
-    )
+
+    training_args = build_training_arguments(args, output_dir)
 
     trainer = Seq2SeqTrainer(
         model=model,
