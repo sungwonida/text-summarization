@@ -34,6 +34,7 @@ from transformers import (
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
 )
+from transformers.trainer_utils import get_last_checkpoint
 
 LOGGER = logging.getLogger(__name__)
 
@@ -75,6 +76,16 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         default="outputs/week3",
         help="Directory where checkpoints and evaluation artifacts are stored.",
+    )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        nargs="?",
+        const=True,
+        default=None,
+        help=(
+            "Resume training from the last checkpoint in --output-dir when passed as a flag, "
+            "or from the explicit checkpoint path when a value is provided."
+        ),
     )
     parser.add_argument(
         "--max-source-length",
@@ -339,7 +350,7 @@ def build_training_arguments(args: argparse.Namespace, output_dir: Path) -> Seq2
 
     base_kwargs = {
         "output_dir": str(output_dir),
-        "overwrite_output_dir": True,
+        "overwrite_output_dir": args.resume_from_checkpoint is None,
         "learning_rate": args.learning_rate,
         "per_device_train_batch_size": args.per_device_train_batch_size,
         "per_device_eval_batch_size": args.per_device_eval_batch_size,
@@ -450,6 +461,32 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    resume_argument = args.resume_from_checkpoint
+    resume_path: str | None = None
+    last_checkpoint: str | None = None
+
+    try:
+        last_checkpoint = get_last_checkpoint(str(output_dir))
+    except Exception:  # pragma: no cover - defensive guard against HF internals
+        last_checkpoint = None
+
+    if resume_argument:
+        if isinstance(resume_argument, str):
+            resume_path = resume_argument
+        else:
+            if last_checkpoint:
+                resume_path = last_checkpoint
+            else:
+                LOGGER.warning(
+                    "--resume-from-checkpoint was provided but no checkpoint was found in %s; starting from scratch.",
+                    output_dir,
+                )
+    elif last_checkpoint:
+        LOGGER.warning(
+            "Existing checkpoints detected in %s. Pass --resume-from-checkpoint to resume instead of overwriting.",
+            output_dir,
+        )
+
     if should_enable_tensorboard(args.report_to):
         log_dir = Path(args.logging_dir) if args.logging_dir else output_dir / "runs"
         args.logging_dir = str(log_dir)
@@ -550,7 +587,11 @@ def main():
 
         if tokenized_datasets.get("train") is not None:
             LOGGER.info("Starting training")
-            trainer.train()
+            if resume_path:
+                LOGGER.info("Resuming from checkpoint %s", resume_path)
+                trainer.train(resume_from_checkpoint=resume_path)
+            else:
+                trainer.train()
         else:
             LOGGER.warning("No training split found; skipping training")
 
