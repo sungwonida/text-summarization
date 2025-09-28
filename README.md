@@ -34,6 +34,8 @@ python week3/train_abstractive.py \
 
 The command above downloads the CNN/DailyMail dataset, fine-tunes the baseline model, evaluates it, and produces an `evaluation_report.json` file inside `outputs/week3/`.  Use `--max-train-samples` and `--max-eval-samples` for quick smoke tests on limited hardware (for example, `--max-train-samples 2000 --max-eval-samples 500`).
 
+To resume a previous run, pass `--resume-from-checkpoint` to load the most recent checkpoint in `--output-dir`, or provide an explicit path such as `--resume-from-checkpoint outputs/week3/checkpoint-1000`.
+
 ### TensorBoard logging
 
 TensorBoard logging is enabled by default through Hugging Face's Trainer integration. Run TensorBoard in a separate shell to monitor loss curves, ROUGE scores, and qualitative samples:
