@@ -17,6 +17,7 @@ import inspect
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
@@ -33,10 +34,43 @@ from transformers import (
     DataCollatorForSeq2Seq,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
+    TrainerCallback,
 )
 from transformers.trainer_utils import get_last_checkpoint
 
 LOGGER = logging.getLogger(__name__)
+
+
+def parse_duration_to_seconds(raw_value: str) -> float:
+    """Convert CLI duration strings like ``"0.5s"`` or ``"250ms"`` to seconds."""
+
+    if isinstance(raw_value, (int, float)):
+        return float(raw_value)
+
+    value = str(raw_value).strip().lower()
+    if value == "0":
+        return 0.0
+
+    match = re.fullmatch(r"(?P<number>\d+(?:\.\d+)?)(?P<unit>ms|s)?", value)
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f"Invalid duration '{raw_value}'. Expected values like '0.5s' or '250ms'."
+        )
+
+    number = float(match.group("number"))
+    unit = match.group("unit") or "s"
+
+    if number == 0:
+        return 0.0
+
+    if unit == "ms":
+        return number / 1000.0
+    if unit == "s":
+        return number
+
+    raise argparse.ArgumentTypeError(
+        f"Unsupported duration unit '{unit}' in value '{raw_value}'."
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -159,6 +193,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--iteration-idle-time",
+        type=parse_duration_to_seconds,
+        default=0.0,
+        help=(
+            "Duration to sleep between training steps every --iteration-idle-interval iterations. "
+            "Accepts values like '0.5s' or '250ms'."
+        ),
+    )
+    parser.add_argument(
+        "--iteration-idle-interval",
+        type=int,
+        default=0,
+        help=(
+            "Interval (in steps) for pausing during training/evaluation. Set alongside --iteration-idle-time."
+        ),
+    )
+    parser.add_argument(
         "--evaluation-strategy",
         default="epoch",
         choices=["no", "steps", "epoch"],
@@ -235,6 +286,46 @@ def parse_args() -> argparse.Namespace:
         args.val_max_target_length = args.max_target_length
     args.report_to = normalize_report_to(args.report_to)
     return args
+
+
+class IterationPauseCallback(TrainerCallback):
+    """Pause the training/evaluation loop after a configurable number of steps."""
+
+    def __init__(self, pause_seconds: float, interval: int) -> None:
+        self.pause_seconds = pause_seconds
+        self.interval = interval
+        self._train_step_counter = 0
+        self._prediction_step_counter = 0
+
+    def _should_pause(self, counter: int) -> bool:
+        return self.interval > 0 and self.pause_seconds > 0 and counter % self.interval == 0
+
+    def on_train_begin(self, args, state, control, **kwargs):  # noqa: D401 - HF callback signature
+        self._train_step_counter = 0
+        return control
+
+    def on_step_end(self, args, state, control, **kwargs):  # noqa: D401 - HF callback signature
+        if self.pause_seconds <= 0 or self.interval <= 0:
+            return control
+        self._train_step_counter += 1
+        if self._should_pause(self._train_step_counter):
+            time.sleep(self.pause_seconds)
+        return control
+
+    def on_prediction_step(self, args, state, control, **kwargs):  # noqa: D401 - HF callback signature
+        if self.pause_seconds > 0 and self.interval > 0:
+            self._prediction_step_counter += 1
+            if self._should_pause(self._prediction_step_counter):
+                time.sleep(self.pause_seconds)
+        return control
+
+    def on_evaluate(self, args, state, control, **kwargs):  # noqa: D401 - HF callback signature
+        self._prediction_step_counter = 0
+        return control
+
+    def on_predict(self, args, state, control, metrics=None, **kwargs):  # noqa: D401 - HF callback signature
+        self._prediction_step_counter = 0
+        return control
 
 
 def configure_logging():
@@ -567,6 +658,14 @@ def main():
             data_collator=data_collator,
             compute_metrics=compute_metrics if args.predict_with_generate else None,
         )
+
+        if args.iteration_idle_time > 0 and args.iteration_idle_interval > 0:
+            trainer.add_callback(
+                IterationPauseCallback(
+                    pause_seconds=args.iteration_idle_time,
+                    interval=args.iteration_idle_interval,
+                )
+            )
 
         if summary_writer is not None:
             summary_writer.add_text(
