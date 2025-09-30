@@ -7,3 +7,5 @@ sentencepiece>=0.1.99
 rouge-score>=0.1.2
 numpy>=1.23
 tensorboard>=2.14.0
+matplotlib>=3.7.0
+bert-score>=0.3.13

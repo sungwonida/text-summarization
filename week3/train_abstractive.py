@@ -20,7 +20,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from contextlib import contextmanager
 
@@ -28,6 +28,11 @@ import numpy as np
 import torch
 from datasets import DatasetDict, load_dataset
 import evaluate
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
@@ -280,6 +285,24 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Number of qualitative samples to store in the evaluation report.",
     )
+    parser.add_argument(
+        "--sample-inspection-mode",
+        choices=["off", "debug_path", "tensorboard"],
+        default="debug_path",
+        help=(
+            "Control how good/bad training samples are dropped for inspection. "
+            "Use 'debug_path' (default) to write artifacts to disk, 'tensorboard' to log them "
+            "to TensorBoard, or 'off' to disable the feature."
+        ),
+    )
+    parser.add_argument(
+        "--sample-inspection-dir",
+        default=None,
+        help=(
+            "Directory where inspection artifacts (texts, metrics, attention visualizations) "
+            "are stored when --sample-inspection-mode=debug_path. Defaults to <output-dir>/debug_samples."
+        ),
+    )
 
     args = parser.parse_args()
     if args.val_max_target_length is None:
@@ -434,6 +457,243 @@ def postprocess_text(preds: Iterable[str], labels: Iterable[str]) -> Tuple[List[
     preds = [pred.strip() for pred in preds]
     labels = [label.strip() for label in labels]
     return preds, labels
+
+
+def _convert_metric_value(value):
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().cpu().item())
+    if isinstance(value, np.generic):
+        return float(value.item())
+    if isinstance(value, (int, float)):
+        return float(value)
+    return value
+
+
+def compute_sample_quality_metrics(
+    rouge_metric,
+    bertscore_metric,
+    article: str,
+    reference_summary: str,
+    predicted_summary: str,
+    baseline_sentences: int,
+):
+    lead_summary = lead_n(article, baseline_sentences)
+
+    lead_scores = rouge_metric.compute(
+        predictions=[lead_summary],
+        references=[reference_summary],
+        use_stemmer=True,
+    )
+    lead_scores = {key: _convert_metric_value(value) for key, value in lead_scores.items()}
+
+    rouge_scores = rouge_metric.compute(
+        predictions=[predicted_summary],
+        references=[reference_summary],
+        use_stemmer=True,
+    )
+    rouge_scores = {key: _convert_metric_value(value) for key, value in rouge_scores.items()}
+
+    bert_scores: Optional[Dict[str, float]] = None
+    if bertscore_metric is not None:
+        try:
+            bertscore_result = bertscore_metric.compute(
+                predictions=[predicted_summary],
+                references=[reference_summary],
+                lang="en",
+            )
+            bert_scores = {
+                "precision": _convert_metric_value(bertscore_result["precision"][0]),
+                "recall": _convert_metric_value(bertscore_result["recall"][0]),
+                "f1": _convert_metric_value(bertscore_result["f1"][0]),
+                "hashcode": bertscore_result.get("hashcode"),
+            }
+        except Exception as exc:  # pragma: no cover - defensive guard around optional dependency
+            LOGGER.warning("Unable to compute BERTScore for inspection sample: %s", exc)
+
+    metrics = {
+        "lead3": lead_scores,
+        "rouge": rouge_scores,
+        "bertscore": bert_scores,
+    }
+
+    return lead_summary, metrics
+
+
+def select_primary_score(metrics: Dict[str, Dict[str, float] | None]) -> float:
+    bert_scores = metrics.get("bertscore")
+    if isinstance(bert_scores, dict) and bert_scores.get("f1") is not None:
+        return float(bert_scores["f1"])
+    rouge_scores = metrics.get("rouge") or {}
+    for key in ("rougeLsum", "rougeL", "rouge1", "rouge2"):
+        value = rouge_scores.get(key)
+        if value is not None:
+            return float(value)
+    return 0.0
+
+
+def extract_attention_details(
+    model,
+    tokenizer,
+    encoded_inputs,
+    device_inputs,
+    generated_ids,
+):
+    if generated_ids.size(-1) <= 1:
+        return None
+
+    decoder_input_ids = generated_ids[:, :-1]
+    try:
+        with torch.no_grad():
+            outputs = model(
+                **device_inputs,
+                decoder_input_ids=decoder_input_ids,
+                output_attentions=True,
+                use_cache=False,
+                return_dict=True,
+            )
+    except Exception as exc:  # pragma: no cover - guard for model incompatibilities
+        LOGGER.warning("Unable to retrieve attention weights for inspection sample: %s", exc)
+        return None
+
+    cross_attentions = getattr(outputs, "cross_attentions", None)
+    if not cross_attentions:
+        return None
+
+    try:
+        attention_stack = torch.stack([layer[0] for layer in cross_attentions], dim=0)
+        attention_matrix = attention_stack.mean(dim=1).mean(dim=0)
+    except Exception as exc:  # pragma: no cover - guard for unexpected tensor shapes
+        LOGGER.warning("Failed to aggregate attention weights: %s", exc)
+        return None
+
+    if "attention_mask" in encoded_inputs:
+        input_len = int(encoded_inputs["attention_mask"][0].sum().item())
+    else:
+        input_len = encoded_inputs["input_ids"].shape[-1]
+
+    output_len = attention_matrix.size(0)
+    attention_matrix = attention_matrix[:output_len, :input_len].detach().cpu().numpy()
+
+    input_tokens = tokenizer.convert_ids_to_tokens(
+        encoded_inputs["input_ids"][0][:input_len].tolist()
+    )
+    decoder_tokens = tokenizer.convert_ids_to_tokens(
+        decoder_input_ids[0][:output_len].detach().cpu().tolist()
+    )
+
+    return {
+        "matrix": attention_matrix,
+        "input_tokens": input_tokens,
+        "output_tokens": decoder_tokens,
+    }
+
+
+def render_attention_heatmap(attention_details: Dict[str, object], title: str):
+    matrix = np.asarray(attention_details["matrix"], dtype=np.float32)
+    input_tokens = list(attention_details["input_tokens"])
+    output_tokens = list(attention_details["output_tokens"])
+
+    width = max(6.0, min(12.0, len(input_tokens) * 0.35))
+    height = max(4.0, min(10.0, len(output_tokens) * 0.35))
+    fig, ax = plt.subplots(figsize=(width, height))
+    im = ax.imshow(matrix, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis")
+    ax.set_xlabel("Input Tokens")
+    ax.set_ylabel("Output Tokens")
+    ax.set_title(title)
+
+    ax.set_xticks(range(len(input_tokens)))
+    ax.set_xticklabels(input_tokens, rotation=90, fontsize=6)
+    ax.set_yticks(range(len(output_tokens)))
+    ax.set_yticklabels(output_tokens, fontsize=6)
+
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    return fig
+
+
+def figure_to_array(fig) -> np.ndarray:
+    fig.canvas.draw()
+    width, height = fig.canvas.get_width_height()
+    image = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+    image = image.reshape((height, width, 3))
+    return image
+
+
+def save_inspection_artifacts(
+    sample: Optional[Dict[str, object]],
+    tag: str,
+    base_dir: Optional[Path],
+    global_step: int,
+    summary_writer,
+    mode: str,
+):
+    if sample is None:
+        return
+
+    directory_basename = f"{tag}_sample"
+    sample_dir: Optional[Path] = None
+    if base_dir is not None:
+        sample_dir = base_dir / f"step_{global_step:06d}" / directory_basename
+        sample_dir.mkdir(parents=True, exist_ok=True)
+
+    text_content_lines = [
+        f"Sample type: {tag}",
+        f"Sample index: {sample.get('sample_index')}",
+        "",
+        "Article:",
+        str(sample.get("article", "")),
+        "",
+        "Reference Summary:",
+        str(sample.get("reference_summary", "")),
+        "",
+        "Model Summary:",
+        str(sample.get("model_summary", "")),
+        "",
+        "Lead Summary:",
+        str(sample.get("lead_summary", "")),
+        "",
+        "Metrics:",
+        json.dumps(sample.get("metrics", {}), indent=2),
+    ]
+    text_content = "\n".join(text_content_lines)
+
+    if sample_dir is not None:
+        text_path = sample_dir / f"{directory_basename}.txt"
+        with text_path.open("w", encoding="utf-8") as f:
+            f.write(text_content)
+
+        metrics_path = sample_dir / f"{directory_basename}.json"
+        with metrics_path.open("w", encoding="utf-8") as f:
+            json.dump(sample.get("metrics", {}), f, indent=2)
+
+    if summary_writer is not None and mode == "tensorboard":
+        summary_writer.add_text(
+            f"inspection/{tag}",
+            text_content,
+            global_step=global_step,
+        )
+
+    attention_details = sample.get("attention") if isinstance(sample, dict) else None
+    if attention_details is None:
+        return
+
+    attention_title = f"{tag.title()} Sample Attention"
+    fig = render_attention_heatmap(attention_details, attention_title)
+
+    if sample_dir is not None:
+        attention_path = sample_dir / f"{directory_basename}.png"
+        fig.savefig(attention_path, bbox_inches="tight")
+
+    if summary_writer is not None and mode == "tensorboard":
+        image_array = figure_to_array(fig)
+        summary_writer.add_image(
+            f"inspection/{tag}/attention",
+            image_array,
+            global_step=global_step,
+            dataformats="HWC",
+        )
+
+    plt.close(fig)
 
 
 def build_training_arguments(args: argparse.Namespace, output_dir: Path) -> Seq2SeqTrainingArguments:
@@ -647,6 +907,27 @@ def main():
 
 
     with tensorboard_writer_context(args, output_dir) as summary_writer:
+        inspection_mode = args.sample_inspection_mode
+        inspection_enabled = inspection_mode != "off"
+        inspection_dir: Optional[Path] = None
+        if inspection_enabled and inspection_mode == "tensorboard" and summary_writer is None:
+            LOGGER.warning(
+                "TensorBoard inspection requested but TensorBoard logging is disabled; falling back to debug path."
+            )
+            inspection_mode = "debug_path"
+        if inspection_enabled:
+            if inspection_mode == "debug_path":
+                base_dir = (
+                    Path(args.sample_inspection_dir)
+                    if args.sample_inspection_dir
+                    else output_dir / "debug_samples"
+                )
+                base_dir.mkdir(parents=True, exist_ok=True)
+                inspection_dir = base_dir
+            elif args.sample_inspection_dir:
+                inspection_dir = Path(args.sample_inspection_dir)
+                inspection_dir.mkdir(parents=True, exist_ok=True)
+
         training_args = build_training_arguments(args, output_dir)
 
         trainer = Seq2SeqTrainer(
@@ -723,7 +1004,17 @@ def main():
             )
             LOGGER.info("Lead-%d baseline scores: %s", args.baseline_sentences, baseline_scores)
 
-        qualitative_samples: List[Dict[str, str]] = []
+        qualitative_samples: List[Dict[str, object]] = []
+        best_inspection_sample: Optional[Dict[str, object]] = None
+        worst_inspection_sample: Optional[Dict[str, object]] = None
+        bertscore_metric = None
+        if inspection_enabled:
+            try:
+                bertscore_metric = evaluate.load("bertscore")
+            except Exception as exc:  # pragma: no cover - network/model download issues
+                LOGGER.warning("Unable to load BERTScore metric for sample inspection: %s", exc)
+                bertscore_metric = None
+
         if eval_split is not None:
             LOGGER.info("Generating qualitative samples")
             eval_dataset_for_samples = raw_datasets.get("test") or raw_datasets.get("validation")
@@ -737,30 +1028,80 @@ def main():
                     record = eval_dataset_for_samples[idx]
                     input_text = record[columns.text_column]
                     reference_summary = record[columns.summary_column]
-                    inputs = tokenizer(
+                    encoded_inputs = tokenizer(
                         input_text,
                         return_tensors="pt",
                         max_length=args.max_source_length,
                         truncation=True,
                     )
-                    inputs = {k: v.to(device) for k, v in inputs.items()}
+                    device_inputs = {k: v.to(device) for k, v in encoded_inputs.items()}
                     with torch.no_grad():
-                        generated_ids = model.generate(
-                            **inputs,
+                        generation = model.generate(
+                            **device_inputs,
                             max_length=args.val_max_target_length,
                             num_beams=args.generation_num_beams,
+                            return_dict_in_generate=True,
                         )
+                    generated_ids = generation.sequences
                     predicted_summary = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-                    qualitative_samples.append(
-                        {
+
+                    lead_summary = lead_n(input_text, args.baseline_sentences)
+                    metrics = None
+                    primary_score = None
+                    attention_details = None
+
+                    if inspection_enabled:
+                        attention_details = extract_attention_details(
+                            model,
+                            tokenizer,
+                            encoded_inputs,
+                            device_inputs,
+                            generated_ids,
+                        )
+                        lead_summary, metrics = compute_sample_quality_metrics(
+                            rouge_metric=rouge,
+                            bertscore_metric=bertscore_metric,
+                            article=input_text,
+                            reference_summary=reference_summary,
+                            predicted_summary=predicted_summary,
+                            baseline_sentences=args.baseline_sentences,
+                        )
+                        primary_score = select_primary_score(metrics)
+
+                    qualitative_sample: Dict[str, object] = {
+                        "article": input_text,
+                        "reference_summary": reference_summary,
+                        "model_summary": predicted_summary,
+                        "lead_summary": lead_summary,
+                    }
+                    if metrics is not None:
+                        qualitative_sample["metrics"] = metrics
+                    qualitative_samples.append(qualitative_sample)
+
+                    if inspection_enabled and metrics is not None:
+                        inspection_record = {
                             "article": input_text,
                             "reference_summary": reference_summary,
                             "model_summary": predicted_summary,
+                            "lead_summary": lead_summary,
+                            "metrics": metrics,
+                            "attention": attention_details,
+                            "sample_index": idx,
+                            "primary_score": primary_score,
                         }
-                    )
+                        if (
+                            best_inspection_sample is None
+                            or primary_score > best_inspection_sample.get("primary_score", float("-inf"))
+                        ):
+                            best_inspection_sample = inspection_record
+                        if (
+                            worst_inspection_sample is None
+                            or primary_score < worst_inspection_sample.get("primary_score", float("inf"))
+                        ):
+                            worst_inspection_sample = inspection_record
 
+        global_step = getattr(trainer.state, "global_step", 0)
         if summary_writer is not None:
-            global_step = getattr(trainer.state, "global_step", 0)
             if eval_metrics:
                 for key, value in eval_metrics.items():
                     if isinstance(value, (int, float)):
@@ -775,6 +1116,45 @@ def main():
                     json.dumps(sample, indent=2),
                     global_step=global_step,
                 )
+
+        if inspection_enabled:
+            save_inspection_artifacts(
+                best_inspection_sample,
+                "good",
+                inspection_dir,
+                global_step,
+                summary_writer,
+                inspection_mode,
+            )
+            save_inspection_artifacts(
+                worst_inspection_sample,
+                "bad",
+                inspection_dir,
+                global_step,
+                summary_writer,
+                inspection_mode,
+            )
+
+        inspection_summary = None
+        if inspection_enabled:
+            def serialize_inspection_sample(sample: Optional[Dict[str, object]]):
+                if not sample:
+                    return None
+                return {
+                    "sample_index": sample.get("sample_index"),
+                    "article": sample.get("article"),
+                    "reference_summary": sample.get("reference_summary"),
+                    "model_summary": sample.get("model_summary"),
+                    "lead_summary": sample.get("lead_summary"),
+                    "metrics": sample.get("metrics"),
+                    "primary_score": sample.get("primary_score"),
+                }
+
+            inspection_summary = {
+                "mode": inspection_mode,
+                "good": serialize_inspection_sample(best_inspection_sample),
+                "bad": serialize_inspection_sample(worst_inspection_sample),
+            }
 
         report = {
             "dataset": {
@@ -791,6 +1171,9 @@ def main():
             "baseline": baseline_scores,
             "samples": qualitative_samples,
         }
+
+        if inspection_summary:
+            report["inspection"] = inspection_summary
 
         report_path = output_dir / "evaluation_report.json"
         LOGGER.info("Writing evaluation report to %s", report_path)
