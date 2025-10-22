@@ -1,4 +1,4 @@
-"""Core building blocks for the week 3 abstractive summarization pipeline."""
+"""Core building blocks for the abstractive summarization pipeline."""
 
 from .callbacks import EvaluationInspectionCallback, IterationPauseCallback
 from .config import TrainingConfig, parse_training_args
@@ -36,4 +36,3 @@ __all__ = [
     "save_inspection_artifacts",
     "tensorboard_writer_context",
 ]
-
