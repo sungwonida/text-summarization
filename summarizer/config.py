@@ -323,7 +323,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def parse_training_args(argv: Optional[Sequence[str]] = None) -> TrainingConfig:
     parser = build_arg_parser()
-    namespace = parser.parse_args(argv=argv)
+    namespace = parser.parse_args(argv)
     if namespace.val_max_target_length is None:
         namespace.val_max_target_length = namespace.max_target_length
     namespace.report_to = normalize_report_to(namespace.report_to)
