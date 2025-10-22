@@ -1,4 +1,4 @@
-# week3/save_attention_maps.py
+# scripts/save_attention_maps.py
 import argparse, os, json
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
@@ -75,7 +75,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True, help="checkpoint dir or HF model id")
     ap.add_argument("--texts-file", required=True, help="One source document per line")
-    ap.add_argument("--outdir", default="outputs/week3/attn_maps")
+    ap.add_argument("--outdir", default="outputs/attention_maps")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
     ap.add_argument("--max-input-len", type=int, default=512)
     ap.add_argument("--max-new-tokens", type=int, default=64)

@@ -1,4 +1,4 @@
-"""Train and evaluate a baseline abstractive summarization model for Week 3.
+"""Train and evaluate a baseline abstractive summarization model.
 
 This script fine-tunes a pretrained seq2seq model (default: distilbart-cnn-12-6)
 from Hugging Face Transformers on an English summarization dataset (default:
@@ -32,7 +32,7 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint
 
-from week3.core import (
+from summarizer import (
     EvaluationInspectionCallback,
     IterationPauseCallback,
     TrainingConfig,

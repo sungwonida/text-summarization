@@ -128,7 +128,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir",
-        default="outputs/week3",
+        default="outputs/abstractive",
         help="Directory where checkpoints and evaluation artifacts are stored.",
     )
     parser.add_argument(
@@ -362,4 +362,3 @@ def parse_training_args(argv: Optional[Sequence[str]] = None) -> TrainingConfig:
         sample_inspection_mode=namespace.sample_inspection_mode,
         sample_inspection_dir=namespace.sample_inspection_dir,
     )
-
