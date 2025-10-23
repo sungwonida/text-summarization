@@ -5,15 +5,79 @@ from __future__ import annotations
 import inspect
 import logging
 from pathlib import Path
-from typing import Dict, Mapping
+from typing import Dict, Mapping, Optional
 
 import numpy as np
+import torch
+from torch.utils.data import Sampler
 from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
 
 from .config import TrainingConfig
 from .inspection import postprocess_text
 
 LOGGER = logging.getLogger(__name__)
+
+
+class RandomSubsetSampler(Sampler[int]):
+    """Sampler that draws a new random subset of indices on every epoch."""
+
+    def __init__(self, data_source, *, num_samples: int, seed: int) -> None:
+        if num_samples <= 0:
+            raise ValueError("num_samples must be a positive integer.")
+        self.data_source = data_source
+        self.num_samples = num_samples
+        self.seed = seed
+        self._epoch = 0
+
+    def __iter__(self):
+        dataset_size = len(self.data_source)
+        requested = min(self.num_samples, dataset_size)
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self._epoch)
+        self._epoch += 1
+
+        # torch.randperm provides a reproducible permutation based on the generator seed.
+        indices = torch.randperm(dataset_size, generator=generator).tolist()
+        return iter(indices[:requested])
+
+    def __len__(self) -> int:
+        return min(self.num_samples, len(self.data_source))
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = epoch
+
+
+class CappedSeq2SeqTrainer(Seq2SeqTrainer):
+    """Seq2SeqTrainer variant that caps per-epoch training samples via random subsets."""
+
+    def __init__(self, *args, max_train_samples_per_epoch: Optional[int] = None, **kwargs):
+        self._max_train_samples_per_epoch = max_train_samples_per_epoch
+        super().__init__(*args, **kwargs)
+
+    def _get_train_sampler(self, *args, **kwargs):
+        sampler = super()._get_train_sampler(*args, **kwargs)
+        if self._max_train_samples_per_epoch is None:
+            return sampler
+        if sampler is None:
+            return None
+        dataset = args[0] if args else getattr(self, "train_dataset", None)
+        if dataset is None:
+            return sampler
+        dataset_size = len(dataset)
+        if dataset_size <= self._max_train_samples_per_epoch:
+            return sampler
+        if getattr(self.args, "world_size", 1) > 1:
+            LOGGER.warning(
+                "Capped per-epoch sampling is not currently supported with distributed training; "
+                "falling back to the default sampler."
+            )
+            return sampler
+
+        return RandomSubsetSampler(
+            dataset,
+            num_samples=self._max_train_samples_per_epoch,
+            seed=getattr(self.args, "seed", 0),
+        )
 
 
 def build_training_arguments(config: TrainingConfig, output_dir: Path) -> Seq2SeqTrainingArguments:
@@ -120,7 +184,7 @@ def create_trainer(
     compute_metrics=None,
 ):
     eval_dataset = tokenized_datasets.get("validation") or tokenized_datasets.get("test")
-    return Seq2SeqTrainer(
+    return CappedSeq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_datasets.get("train"),
@@ -128,4 +192,5 @@ def create_trainer(
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics if config.predict_with_generate else None,
+        max_train_samples_per_epoch=config.max_train_samples,
     )
