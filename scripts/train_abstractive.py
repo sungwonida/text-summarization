@@ -75,6 +75,19 @@ def main():
     configure_logging()
     config = parse_args()
 
+    if (
+        config.sample_inspection_mode == "off"
+        and (
+            config.tracked_sample_index is not None
+            or config.tracked_sample_id_column is not None
+        )
+    ):
+        LOGGER.warning(
+            "Tracked sample snapshots requested but sample inspection mode is 'off'; "
+            "enabling debug_path output."
+        )
+        config.sample_inspection_mode = "debug_path"
+
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
