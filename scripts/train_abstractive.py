@@ -137,14 +137,20 @@ def main():
         desc="Tokenizing",
     )
 
-    if config.max_train_samples:
-        tokenized_datasets["train"] = tokenized_datasets["train"].select(range(config.max_train_samples))
     if config.max_eval_samples:
         for split_name in ("validation", "test"):
             if split_name in tokenized_datasets:
                 tokenized_datasets[split_name] = tokenized_datasets[split_name].select(
                     range(min(config.max_eval_samples, len(tokenized_datasets[split_name])))
                 )
+
+    if config.max_train_samples and "train" in tokenized_datasets:
+        total_train_examples = len(tokenized_datasets["train"])
+        LOGGER.info(
+            "Per-epoch training will sample up to %d examples from %d available.",
+            min(config.max_train_samples, total_train_examples),
+            total_train_examples,
+        )
 
     inspection_dataset = raw_datasets.get("test") or raw_datasets.get("validation")
     if inspection_dataset is not None and config.max_eval_samples:

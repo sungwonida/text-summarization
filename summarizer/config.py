@@ -260,7 +260,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--max-train-samples",
         type=int,
         default=None,
-        help="If set, truncates the training set to the specified number of samples.",
+        help=(
+            "If set, caps the number of training samples processed per epoch; "
+            "each epoch draws a fresh random subset."
+        ),
     )
     parser.add_argument(
         "--max-eval-samples",
