@@ -201,22 +201,29 @@ def save_inspection_artifacts(
     text_content_lines = [
         f"Sample type: {tag}",
         f"Sample index: {sample.get('sample_index')}",
-        "",
-        "Article:",
-        str(sample.get("article", "")),
-        "",
-        "Reference Summary:",
-        str(sample.get("reference_summary", "")),
-        "",
-        "Model Summary:",
-        str(sample.get("model_summary", "")),
-        "",
-        "Lead Summary:",
-        str(sample.get("lead_summary", "")),
-        "",
-        "Metrics:",
-        json.dumps(sample.get("metrics", {}), indent=2),
     ]
+    identifier_value = sample.get("sample_identifier")
+    if identifier_value:
+        text_content_lines.append(f"Sample identifier: {identifier_value}")
+    text_content_lines.extend(
+        [
+            "",
+            "Article:",
+            str(sample.get("article", "")),
+            "",
+            "Reference Summary:",
+            str(sample.get("reference_summary", "")),
+            "",
+            "Model Summary:",
+            str(sample.get("model_summary", "")),
+            "",
+            "Lead Summary:",
+            str(sample.get("lead_summary", "")),
+            "",
+            "Metrics:",
+            json.dumps(sample.get("metrics", {}), indent=2),
+        ]
+    )
     text_content = "\n".join(text_content_lines)
 
     if sample_dir is not None:
@@ -285,82 +292,124 @@ def collect_samples_for_inspection(
     sample_indices = range(max_samples)
 
     for idx in sample_indices:
-        record = dataset[idx]
-        input_text = record[columns.text_column]
-        reference_summary = record[columns.summary_column]
-
-        encoded_inputs = tokenizer(
-            input_text,
-            return_tensors="pt",
-            max_length=config.max_source_length,
-            truncation=True,
+        qualitative_sample, inspection_record = inspect_dataset_sample(
+            dataset,
+            sample_index=idx,
+            columns=columns,
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
+            config=config,
+            rouge_metric=rouge_metric,
+            bertscore_metric=bertscore_metric,
+            inspection_enabled=inspection_enabled,
         )
-        device_inputs = {k: v.to(device) for k, v in encoded_inputs.items()}
+        if qualitative_sample is not None:
+            qualitative_samples.append(qualitative_sample)
 
-        with torch.no_grad():
-            generation = model.generate(
-                **device_inputs,
-                max_length=config.val_max_target_length,
-                num_beams=config.generation_num_beams,
-                return_dict_in_generate=True,
-            )
-
-        generated_ids = generation.sequences
-        predicted_summary = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-
-        attention_details = None
-        lead_summary = lead_n(input_text, config.baseline_sentences)
-        metrics = None
-        primary_score = None
-
-        if inspection_enabled:
-            attention_details = extract_attention_details(
-                model,
-                tokenizer,
-                encoded_inputs,
-                device_inputs,
-                generated_ids,
-            )
-            lead_summary, metrics = compute_sample_quality_metrics(
-                rouge_metric=rouge_metric,
-                bertscore_metric=bertscore_metric,
-                article=input_text,
-                reference_summary=reference_summary,
-                predicted_summary=predicted_summary,
-                baseline_sentences=config.baseline_sentences,
-            )
-            primary_score = select_primary_score(metrics)
-
-        qualitative_sample: Dict[str, object] = {
-            "article": input_text,
-            "reference_summary": reference_summary,
-            "model_summary": predicted_summary,
-            "lead_summary": lead_summary,
-        }
-        if metrics is not None:
-            qualitative_sample["metrics"] = metrics
-        qualitative_samples.append(qualitative_sample)
-
-        if inspection_enabled and metrics is not None:
-            inspection_record = {
-                "article": input_text,
-                "reference_summary": reference_summary,
-                "model_summary": predicted_summary,
-                "lead_summary": lead_summary,
-                "metrics": metrics,
-                "attention": attention_details,
-                "sample_index": idx,
-                "primary_score": primary_score,
-            }
+        if inspection_enabled and inspection_record is not None:
             if (
                 best_sample is None
-                or primary_score > best_sample.get("primary_score", float("-inf"))
+                or inspection_record.get("primary_score", float("-inf"))
+                > best_sample.get("primary_score", float("-inf"))
             ):
                 best_sample = inspection_record
             if (
                 worst_sample is None
-                or primary_score < worst_sample.get("primary_score", float("inf"))
+                or inspection_record.get("primary_score", float("inf"))
+                < worst_sample.get("primary_score", float("inf"))
             ):
                 worst_sample = inspection_record
 
     return qualitative_samples, best_sample, worst_sample
+
+
+def inspect_dataset_sample(
+    dataset,
+    *,
+    sample_index: int,
+    columns: ColumnMapping,
+    model,
+    tokenizer,
+    device: torch.device,
+    config: TrainingConfig,
+    rouge_metric,
+    bertscore_metric,
+    inspection_enabled: bool,
+):
+    if dataset is None:
+        return None, None
+
+    total_records = len(dataset)
+    if sample_index < 0 or sample_index >= total_records:
+        return None, None
+
+    record = dataset[sample_index]
+    input_text = record[columns.text_column]
+    reference_summary = record[columns.summary_column]
+
+    encoded_inputs = tokenizer(
+        input_text,
+        return_tensors="pt",
+        max_length=config.max_source_length,
+        truncation=True,
+    )
+    device_inputs = {k: v.to(device) for k, v in encoded_inputs.items()}
+
+    with torch.no_grad():
+        generation = model.generate(
+            **device_inputs,
+            max_length=config.val_max_target_length,
+            num_beams=config.generation_num_beams,
+            return_dict_in_generate=True,
+        )
+
+    generated_ids = generation.sequences
+    predicted_summary = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
+    attention_details = None
+    lead_summary = lead_n(input_text, config.baseline_sentences)
+    metrics = None
+    primary_score = None
+
+    if inspection_enabled:
+        attention_details = extract_attention_details(
+            model,
+            tokenizer,
+            encoded_inputs,
+            device_inputs,
+            generated_ids,
+        )
+        lead_summary, metrics = compute_sample_quality_metrics(
+            rouge_metric=rouge_metric,
+            bertscore_metric=bertscore_metric,
+            article=input_text,
+            reference_summary=reference_summary,
+            predicted_summary=predicted_summary,
+            baseline_sentences=config.baseline_sentences,
+        )
+        primary_score = select_primary_score(metrics)
+
+    qualitative_sample: Dict[str, object] = {
+        "article": input_text,
+        "reference_summary": reference_summary,
+        "model_summary": predicted_summary,
+        "lead_summary": lead_summary,
+    }
+    if metrics is not None:
+        qualitative_sample["metrics"] = metrics
+
+    inspection_record = None
+    if inspection_enabled and metrics is not None:
+        inspection_record = {
+            "article": input_text,
+            "reference_summary": reference_summary,
+            "model_summary": predicted_summary,
+            "lead_summary": lead_summary,
+            "metrics": metrics,
+            "attention": attention_details,
+            "sample_index": sample_index,
+            "primary_score": primary_score,
+        }
+
+    return qualitative_sample, inspection_record

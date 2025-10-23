@@ -88,6 +88,9 @@ class TrainingConfig:
     num_samples_for_report: int = 3
     sample_inspection_mode: str = "debug_path"
     sample_inspection_dir: Optional[str] = None
+    tracked_sample_index: Optional[int] = None
+    tracked_sample_id_column: Optional[str] = None
+    tracked_sample_id_value: Optional[str] = None
 
     def tensorboard_enabled(self) -> bool:
         return should_enable_tensorboard(self.report_to)
@@ -321,12 +324,45 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "are stored when --sample-inspection-mode=debug_path. Defaults to <output-dir>/debug_samples."
         ),
     )
+    parser.add_argument(
+        "--tracked-sample-index",
+        type=int,
+        default=None,
+        help=(
+            "Index of the evaluation sample to snapshot after each evaluation step. "
+            "Must refer to the evaluation split after any --max-eval-samples truncation."
+        ),
+    )
+    parser.add_argument(
+        "--tracked-sample-id-column",
+        default=None,
+        help=(
+            "Name of the dataset column used to locate the tracked evaluation sample. "
+            "Requires --tracked-sample-id-value."
+        ),
+    )
+    parser.add_argument(
+        "--tracked-sample-id-value",
+        default=None,
+        help=(
+            "Value in --tracked-sample-id-column for the evaluation sample to snapshot. "
+            "Cannot be combined with --tracked-sample-index."
+        ),
+    )
     return parser
 
 
 def parse_training_args(argv: Optional[Sequence[str]] = None) -> TrainingConfig:
     parser = build_arg_parser()
     namespace = parser.parse_args(argv)
+    if namespace.tracked_sample_index is not None and namespace.tracked_sample_index < 0:
+        parser.error("--tracked-sample-index must be a non-negative integer.")
+    has_id_column = namespace.tracked_sample_id_column is not None
+    has_id_value = namespace.tracked_sample_id_value is not None
+    if has_id_column != has_id_value:
+        parser.error("--tracked-sample-id-column requires --tracked-sample-id-value (and vice versa).")
+    if namespace.tracked_sample_index is not None and has_id_column:
+        parser.error("Use either --tracked-sample-index or --tracked-sample-id-*, not both.")
     if namespace.val_max_target_length is None:
         namespace.val_max_target_length = namespace.max_target_length
     namespace.report_to = normalize_report_to(namespace.report_to)
@@ -364,4 +400,7 @@ def parse_training_args(argv: Optional[Sequence[str]] = None) -> TrainingConfig:
         num_samples_for_report=namespace.num_samples_for_report,
         sample_inspection_mode=namespace.sample_inspection_mode,
         sample_inspection_dir=namespace.sample_inspection_dir,
+        tracked_sample_index=namespace.tracked_sample_index,
+        tracked_sample_id_column=namespace.tracked_sample_id_column,
+        tracked_sample_id_value=namespace.tracked_sample_id_value,
     )
