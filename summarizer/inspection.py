@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -40,14 +41,24 @@ def compute_sample_quality_metrics(
     reference_summary: str,
     predicted_summary: str,
     baseline_sentences: int,
+    *,
+    seed: int | None = None,
 ):
     lead_summary = lead_n(article, baseline_sentences)
 
-    lead_scores = rouge_metric.compute(
-        predictions=[lead_summary],
-        references=[reference_summary],
-        use_stemmer=True,
-    )
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        if hasattr(rouge_metric, "seed"):
+            rouge_metric.seed = seed
+
+    rouge_kwargs = {
+        "predictions": [lead_summary],
+        "references": [reference_summary],
+        "use_stemmer": True,
+    }
+
+    lead_scores = rouge_metric.compute(**rouge_kwargs)
     lead_scores = {key: _convert_metric_value(value) for key, value in lead_scores.items()}
 
     rouge_scores = rouge_metric.compute(
@@ -276,6 +287,7 @@ def collect_samples_for_inspection(
     rouge_metric,
     bertscore_metric,
     inspection_enabled: bool,
+    seed: int | None = None,
 ):
     qualitative_samples: List[Dict[str, object]] = []
     best_sample: Optional[Dict[str, object]] = None
@@ -303,6 +315,7 @@ def collect_samples_for_inspection(
             rouge_metric=rouge_metric,
             bertscore_metric=bertscore_metric,
             inspection_enabled=inspection_enabled,
+            seed=seed,
         )
         if qualitative_sample is not None:
             qualitative_samples.append(qualitative_sample)
@@ -336,6 +349,7 @@ def inspect_dataset_sample(
     rouge_metric,
     bertscore_metric,
     inspection_enabled: bool,
+    seed: int | None = None,
 ):
     if dataset is None:
         return None, None
@@ -387,6 +401,7 @@ def inspect_dataset_sample(
             reference_summary=reference_summary,
             predicted_summary=predicted_summary,
             baseline_sentences=config.baseline_sentences,
+            seed=seed,
         )
         primary_score = select_primary_score(metrics)
 
