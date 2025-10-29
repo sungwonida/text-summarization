@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
+import random
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import evaluate
+import numpy as np
 from datasets import DatasetDict
 
 SENTENCE_SPLIT_REGEX = re.compile(r"(?<=[.!?])\s+")
@@ -55,8 +57,14 @@ def compute_lead_baseline(
     text_column: str,
     summary_column: str,
     num_sentences: int,
+    *,
+    seed: int | None = None,
 ) -> Dict[str, float]:
     metric = evaluate.load("rouge")
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        metric.seed = seed
     predictions = []
     references = []
 
@@ -96,4 +104,3 @@ def preprocess_function(
         return model_inputs
 
     return _preprocess
-

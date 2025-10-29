@@ -14,7 +14,7 @@ from .inspection import (
     save_inspection_artifacts,
 )
 from .logging_utils import configure_logging, tensorboard_writer_context
-from .runtime import get_device
+from .runtime import get_device, seed_everything
 from .training import build_compute_metrics, build_training_arguments, create_trainer
 
 __all__ = [
@@ -31,6 +31,7 @@ __all__ = [
     "get_device",
     "infer_columns",
     "lead_n",
+    "seed_everything",
     "parse_training_args",
     "preprocess_function",
     "save_inspection_artifacts",

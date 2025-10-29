@@ -90,12 +90,16 @@ class EvaluationInspectionCallback(TrainerCallback):
         self.bertscore_metric = None
         self._tracked_sample_collection_failed = False
         self.tracked_sample_index = self._resolve_tracked_sample_index()
-
+        self.seed = config.seed
+        if hasattr(self.rouge_metric, "seed"):
+            self.rouge_metric.seed = self.seed
     def _ensure_bertscore_metric(self):
         if not self.inspection_enabled or self.bertscore_metric is not None:
             return
         try:  # pragma: no cover - optional dependency download path
             self.bertscore_metric = evaluate.load("bertscore")
+            if hasattr(self.bertscore_metric, "seed"):
+                self.bertscore_metric.seed = self.seed
         except Exception as exc:
             LOGGER.warning("Unable to load BERTScore metric for sample inspection: %s", exc)
             self.bertscore_metric = None
@@ -176,6 +180,7 @@ class EvaluationInspectionCallback(TrainerCallback):
             rouge_metric=self.rouge_metric,
             bertscore_metric=self.bertscore_metric,
             inspection_enabled=self.inspection_enabled,
+            seed=self.seed,
         )
 
         global_step = getattr(state, "global_step", 0)
@@ -217,6 +222,7 @@ class EvaluationInspectionCallback(TrainerCallback):
                 rouge_metric=self.rouge_metric,
                 bertscore_metric=self.bertscore_metric,
                 inspection_enabled=self.inspection_enabled,
+                seed=self.seed,
             )
             if tracked_sample is None:
                 if not self._tracked_sample_collection_failed:
@@ -238,5 +244,4 @@ class EvaluationInspectionCallback(TrainerCallback):
                     self.summary_writer,
                     self.inspection_mode,
                 )
-
         return control

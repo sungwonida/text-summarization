@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import random
 from pathlib import Path
 from typing import Dict, Mapping, Optional
 
@@ -151,10 +152,16 @@ def build_training_arguments(config: TrainingConfig, output_dir: Path) -> Seq2Se
     return Seq2SeqTrainingArguments(**filtered_kwargs)
 
 
-def build_compute_metrics(tokenizer, rouge_metric):
+def build_compute_metrics(tokenizer, rouge_metric, *, seed: int | None = None):
     def compute_metrics(eval_pred):
         predictions, labels = eval_pred
         decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+            if hasattr(rouge_metric, "seed"):
+                rouge_metric.seed = seed
 
         labels = [[label for label in label_row if label != -100] for label_row in labels]
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)

@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import evaluate
-import torch
 from datasets import load_dataset
 import matplotlib
 
@@ -46,6 +45,7 @@ from summarizer import (
     infer_columns,
     parse_training_args,
     preprocess_function,
+    seed_everything,
     save_inspection_artifacts,
     tensorboard_writer_context,
 )
@@ -121,8 +121,8 @@ def main():
     elif config.logging_dir is not None:
         config.logging_dir = str(Path(config.logging_dir))
 
+    seed_everything(config.seed)
     device = get_device()
-    torch.manual_seed(config.seed)
 
     LOGGER.info("Loading dataset %s (%s)", config.dataset_name, config.dataset_config)
     raw_datasets = load_dataset(config.dataset_name, config.dataset_config)
@@ -175,7 +175,9 @@ def main():
     data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, label_pad_token_id=label_pad_token_id)
 
     rouge = evaluate.load("rouge")
-    compute_metrics = build_compute_metrics(tokenizer, rouge)
+    if hasattr(rouge, "seed"):
+        rouge.seed = config.seed
+    compute_metrics = build_compute_metrics(tokenizer, rouge, seed=config.seed)
 
     with tensorboard_writer_context(config, output_dir) as summary_writer:
         inspection_mode = config.sample_inspection_mode
@@ -288,6 +290,7 @@ def main():
                     text_column=columns.text_column,
                     summary_column=columns.summary_column,
                     num_sentences=config.baseline_sentences,
+                    seed=config.seed,
                 )
                 LOGGER.info("Lead-%d baseline scores: %s", config.baseline_sentences, baseline_scores)
 
@@ -301,6 +304,8 @@ def main():
             if bertscore_metric is None:
                 try:
                     bertscore_metric = evaluate.load("bertscore")
+                    if hasattr(bertscore_metric, "seed"):
+                        bertscore_metric.seed = config.seed
                 except Exception as exc:  # pragma: no cover - network/model download issues
                     LOGGER.warning("Unable to load BERTScore metric for sample inspection: %s", exc)
                     bertscore_metric = None
@@ -317,6 +322,7 @@ def main():
                 rouge_metric=rouge,
                 bertscore_metric=bertscore_metric,
                 inspection_enabled=inspection_enabled,
+                seed=config.seed,
             )
 
         global_step = getattr(trainer.state, "global_step", 0)
