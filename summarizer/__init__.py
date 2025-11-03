@@ -1,6 +1,6 @@
 """Core building blocks for the abstractive summarization pipeline."""
 
-from .callbacks import EvaluationInspectionCallback, IterationPauseCallback
+from .callbacks import EvaluationInspectionCallback, IterationPauseCallback, SampleCountLoggingCallback
 from .config import TrainingConfig, parse_training_args
 from .datasets import (
     ColumnMapping,
@@ -22,6 +22,7 @@ __all__ = [
     "TrainingConfig",
     "EvaluationInspectionCallback",
     "IterationPauseCallback",
+    "SampleCountLoggingCallback",
     "build_compute_metrics",
     "build_training_arguments",
     "collect_samples_for_inspection",

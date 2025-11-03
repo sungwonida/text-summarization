@@ -196,7 +196,7 @@ def save_inspection_artifacts(
     sample: Optional[Dict[str, object]],
     tag: str,
     base_dir: Optional[Path],
-    global_step: int,
+    sample_count: int,
     summary_writer,
     mode: str,
 ):
@@ -206,7 +206,7 @@ def save_inspection_artifacts(
     directory_basename = f"{tag}_sample"
     sample_dir: Optional[Path] = None
     if base_dir is not None:
-        sample_dir = base_dir / f"step_{global_step:06d}" / directory_basename
+        sample_dir = base_dir / f"sample_{sample_count:06d}" / directory_basename
         sample_dir.mkdir(parents=True, exist_ok=True)
 
     text_content_lines = [
@@ -250,7 +250,7 @@ def save_inspection_artifacts(
         summary_writer.add_text(
             f"inspection/{tag}",
             text_content,
-            global_step=global_step,
+            global_step=sample_count,
         )
 
     attention_details = sample.get("attention") if isinstance(sample, dict) else None
@@ -269,7 +269,7 @@ def save_inspection_artifacts(
         summary_writer.add_image(
             f"inspection/{tag}/attention",
             image_array,
-            global_step=global_step,
+            global_step=sample_count,
             dataformats="HWC",
         )
 
