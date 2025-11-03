@@ -19,6 +19,25 @@ from .inspection import collect_samples_for_inspection, inspect_dataset_sample, 
 LOGGER = logging.getLogger(__name__)
 
 
+def resolve_sample_count(args, state) -> int:
+    samples_seen = getattr(state, "samples_seen", None)
+    if samples_seen is not None:
+        try:
+            return int(samples_seen)
+        except (TypeError, ValueError):
+            LOGGER.debug("Unable to cast samples_seen=%s to int; falling back to estimation.", samples_seen)
+    global_step = int(getattr(state, "global_step", 0) or 0)
+    train_batch_size = getattr(state, "train_batch_size", None)
+    if train_batch_size is None:
+        train_batch_size = getattr(args, "train_batch_size", None)
+    if train_batch_size is None:
+        per_device = getattr(args, "per_device_train_batch_size", 1)
+        world_size = max(1, getattr(args, "world_size", 1))
+        train_batch_size = per_device * world_size
+    grad_accum = max(1, getattr(args, "gradient_accumulation_steps", 1))
+    return int(global_step * train_batch_size * grad_accum)
+
+
 class IterationPauseCallback(TrainerCallback):
     """Pause the training/evaluation loop after a configurable number of steps."""
 
@@ -183,12 +202,12 @@ class EvaluationInspectionCallback(TrainerCallback):
             seed=self.seed,
         )
 
-        global_step = getattr(state, "global_step", 0)
+        sample_count = resolve_sample_count(args, state)
         save_inspection_artifacts(
             best_sample,
             "good",
             self.inspection_dir,
-            global_step,
+            sample_count,
             self.summary_writer,
             self.inspection_mode,
         )
@@ -196,7 +215,7 @@ class EvaluationInspectionCallback(TrainerCallback):
             worst_sample,
             "bad",
             self.inspection_dir,
-            global_step,
+            sample_count,
             self.summary_writer,
             self.inspection_mode,
         )
@@ -206,7 +225,7 @@ class EvaluationInspectionCallback(TrainerCallback):
                 self.summary_writer.add_text(
                     f"eval_samples/{idx}",
                     json.dumps(sample, indent=2),
-                    global_step=global_step,
+                    global_step=sample_count,
                 )
 
         tracked_sample = None
@@ -240,8 +259,24 @@ class EvaluationInspectionCallback(TrainerCallback):
                     tracked_sample,
                     "tracked",
                     self.inspection_dir,
-                    global_step,
+                    sample_count,
                     self.summary_writer,
                     self.inspection_mode,
                 )
         return control
+
+
+class SampleCountLoggingCallback(TrainerCallback):
+    """Mirror Hugging Face logging to TensorBoard using sample counts instead of global steps."""
+
+    def __init__(self, summary_writer) -> None:
+        self.summary_writer = summary_writer
+
+    def on_log(self, args, state, control, logs=None, **kwargs):  # noqa: D401 - HF callback signature
+        if self.summary_writer is None or not logs:
+            return
+        sample_count = resolve_sample_count(args, state)
+        for key, value in logs.items():
+            if isinstance(value, (int, float)):
+                self.summary_writer.add_scalar(key, value, global_step=sample_count)
+        self.summary_writer.flush()

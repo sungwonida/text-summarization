@@ -34,6 +34,7 @@ from transformers.trainer_utils import get_last_checkpoint
 from summarizer import (
     EvaluationInspectionCallback,
     IterationPauseCallback,
+    SampleCountLoggingCallback,
     TrainingConfig,
     build_compute_metrics,
     build_training_arguments,
@@ -49,6 +50,11 @@ from summarizer import (
     save_inspection_artifacts,
     tensorboard_writer_context,
 )
+
+try:
+    from transformers.integrations import TensorBoardCallback as HF_TensorBoardCallback
+except ImportError:  # pragma: no cover - compatibility with older Transformers releases
+    HF_TensorBoardCallback = None
 
 LOGGER = logging.getLogger(__name__)
 
@@ -237,6 +243,9 @@ def main():
             trainer.add_callback(inspection_callback)
 
         if summary_writer is not None:
+            if HF_TensorBoardCallback is not None:
+                trainer.remove_callback(HF_TensorBoardCallback)
+            trainer.add_callback(SampleCountLoggingCallback(summary_writer))
             summary_writer.add_text(
                 "config/dataset",
                 json.dumps(
@@ -325,21 +334,29 @@ def main():
                 seed=config.seed,
             )
 
-        global_step = getattr(trainer.state, "global_step", 0)
+        samples_seen = getattr(trainer.state, "samples_seen", None)
+        if samples_seen is None:
+            global_step = int(getattr(trainer.state, "global_step", 0) or 0)
+            train_batch_size = getattr(trainer.state, "train_batch_size", None)
+            if train_batch_size is None:
+                train_batch_size = getattr(trainer.args, "train_batch_size", None)
+            if train_batch_size is None:
+                per_device = getattr(trainer.args, "per_device_train_batch_size", 1)
+                world_size = max(1, getattr(trainer.args, "world_size", 1))
+                train_batch_size = per_device * world_size
+            grad_accum = max(1, getattr(trainer.args, "gradient_accumulation_steps", 1))
+            samples_seen = int(global_step * train_batch_size * grad_accum)
+        sample_count = int(samples_seen)
         if summary_writer is not None:
-            if eval_metrics:
-                for key, value in eval_metrics.items():
-                    if isinstance(value, (int, float)):
-                        summary_writer.add_scalar(f"eval/{key}", value, global_step=global_step)
             if baseline_scores:
                 for key, value in baseline_scores.items():
                     if isinstance(value, (int, float)):
-                        summary_writer.add_scalar(f"baseline/{key}", value, global_step=global_step)
+                        summary_writer.add_scalar(f"baseline/{key}", value, global_step=sample_count)
             for idx, sample in enumerate(qualitative_samples):
                 summary_writer.add_text(
                     f"samples/{idx}",
                     json.dumps(sample, indent=2),
-                    global_step=global_step,
+                    global_step=sample_count,
                 )
 
         if inspection_enabled:
@@ -347,7 +364,7 @@ def main():
                 best_inspection_sample,
                 "good",
                 inspection_dir,
-                global_step,
+                sample_count,
                 summary_writer,
                 inspection_mode,
             )
@@ -355,7 +372,7 @@ def main():
                 worst_inspection_sample,
                 "bad",
                 inspection_dir,
-                global_step,
+                sample_count,
                 summary_writer,
                 inspection_mode,
             )

@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import Sampler
 from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
+from transformers.trainer_pt_utils import find_batch_size
 
 from .config import TrainingConfig
 from .inspection import postprocess_text
@@ -53,6 +54,7 @@ class CappedSeq2SeqTrainer(Seq2SeqTrainer):
 
     def __init__(self, *args, max_train_samples_per_epoch: Optional[int] = None, **kwargs):
         self._max_train_samples_per_epoch = max_train_samples_per_epoch
+        self._samples_seen_initialized = False
         super().__init__(*args, **kwargs)
 
     def _get_train_sampler(self, *args, **kwargs):
@@ -79,6 +81,48 @@ class CappedSeq2SeqTrainer(Seq2SeqTrainer):
             num_samples=self._max_train_samples_per_epoch,
             seed=getattr(self.args, "seed", 0),
         )
+
+    def _initialize_samples_seen(self) -> None:
+        if self._samples_seen_initialized:
+            return
+        existing = getattr(self.state, "samples_seen", None)
+        if existing is None:
+            prior_steps = int(getattr(self.state, "global_step", 0) or 0)
+            train_batch_size = getattr(self.state, "train_batch_size", None)
+            if train_batch_size is None:
+                train_batch_size = getattr(self.args, "train_batch_size", None)
+            if train_batch_size is None:
+                per_device = getattr(self.args, "per_device_train_batch_size", 1)
+                world_size = max(1, getattr(self.args, "world_size", 1))
+                train_batch_size = per_device * world_size
+            grad_accum = max(1, getattr(self.args, "gradient_accumulation_steps", 1))
+            existing = int(prior_steps * train_batch_size * grad_accum)
+        if existing is None:
+            existing = 0
+        self.state.samples_seen = int(existing)
+        self._samples_seen_initialized = True
+
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        self._initialize_samples_seen()
+        observed_batch = find_batch_size(inputs)
+        total_samples = None
+        if observed_batch is not None:
+            world_size = max(1, getattr(self.args, "world_size", 1))
+            total_samples = int(observed_batch) * world_size
+        else:
+            fallback_batch = getattr(self.args, "train_batch_size", None)
+            if fallback_batch is None:
+                per_device = getattr(self.args, "per_device_train_batch_size", None)
+                if per_device is not None:
+                    world_size = max(1, getattr(self.args, "world_size", 1))
+                    fallback_batch = int(per_device) * world_size
+            if fallback_batch is not None:
+                total_samples = int(fallback_batch)
+
+        if total_samples is not None:
+            previous = int(getattr(self.state, "samples_seen", 0) or 0)
+            self.state.samples_seen = previous + total_samples
+        return super().training_step(model, inputs, num_items_in_batch=num_items_in_batch)
 
 
 def build_training_arguments(config: TrainingConfig, output_dir: Path) -> Seq2SeqTrainingArguments:
