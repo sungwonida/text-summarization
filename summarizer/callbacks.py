@@ -272,11 +272,26 @@ class SampleCountLoggingCallback(TrainerCallback):
     def __init__(self, summary_writer) -> None:
         self.summary_writer = summary_writer
 
+    @staticmethod
+    def _normalize_tag(tag: str) -> str:
+        """Convert flat metric names into TensorBoard-friendly namespaces."""
+
+        if "/" in tag:
+            return tag
+
+        if "_" in tag:
+            prefix, remainder = tag.split("_", 1)
+            if prefix in {"train", "eval", "test"} and remainder:
+                return f"{prefix}/{remainder}"
+
+        return tag
+
     def on_log(self, args, state, control, logs=None, **kwargs):  # noqa: D401 - HF callback signature
         if self.summary_writer is None or not logs:
             return
         sample_count = resolve_sample_count(args, state)
         for key, value in logs.items():
             if isinstance(value, (int, float)):
-                self.summary_writer.add_scalar(key, value, global_step=sample_count)
+                tag = self._normalize_tag(key)
+                self.summary_writer.add_scalar(tag, value, global_step=sample_count)
         self.summary_writer.flush()
