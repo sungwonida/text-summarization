@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import shlex
+import sys
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Sequence
 
 from .config import TrainingConfig, should_enable_tensorboard
 
@@ -18,6 +21,21 @@ def configure_logging() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
         level=logging.INFO,
     )
+
+
+def record_cli_invocation(output_dir: Path, argv: Optional[Sequence[str]] = None, *, filename: str = "cli_invocations.txt") -> Path:
+    """Append the current command-line invocation to a reproducibility log."""
+
+    args = list(argv) if argv is not None else list(sys.argv)
+    command = " ".join(shlex.quote(entry) for entry in [sys.executable, *args] if entry)
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    log_path = output_dir / filename
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{timestamp} {command}\n")
+
+    return log_path
 
 
 @contextmanager
@@ -44,4 +62,3 @@ def tensorboard_writer_context(config: TrainingConfig, output_dir: Path) -> Iter
     finally:
         writer.flush()
         writer.close()
-

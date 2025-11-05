@@ -46,6 +46,7 @@ from summarizer import (
     infer_columns,
     parse_training_args,
     preprocess_function,
+    record_cli_invocation,
     seed_everything,
     save_inspection_artifacts,
     tensorboard_writer_context,
@@ -96,6 +97,11 @@ def main():
 
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        record_cli_invocation(output_dir)
+    except Exception as exc:  # pragma: no cover - defensive guard around filesystem issues
+        LOGGER.warning("Unable to record CLI invocation: %s", exc)
 
     resume_argument = config.resume_from_checkpoint
     resume_path: Optional[str] = None
