@@ -357,7 +357,7 @@ def main():
             if baseline_scores:
                 for key, value in baseline_scores.items():
                     if isinstance(value, (int, float)):
-                        summary_writer.add_scalar(f"baseline/{key}", value, global_step=sample_count)
+                        summary_writer.add_scalar(str(key), value, global_step=sample_count)
             for idx, sample in enumerate(qualitative_samples):
                 summary_writer.add_text(
                     f"samples/{idx}",
