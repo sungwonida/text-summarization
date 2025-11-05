@@ -38,17 +38,17 @@ python scripts/train_abstractive.py \
   --dataset-name cnn_dailymail \
   --dataset-config 3.0.0 \
   --predict-with-generate \
-  --output-dir outputs/abstractive
+  --output-dir artifacts
 ```
 
 The command downloads the dataset, fine-tunes the baseline model, evaluates it,
-and produces an `evaluation_report.json` file inside `outputs/abstractive/`.
+and produces an `evaluation_report.json` file inside `artifacts/`.
 Use `--max-train-samples` and `--max-eval-samples` for quick smoke tests on
 limited hardware (for example, `--max-train-samples 2000 --max-eval-samples 500`).
 
 To resume a previous run, pass `--resume-from-checkpoint` to load the most recent
 checkpoint in `--output-dir`, or provide an explicit path such as
-`--resume-from-checkpoint outputs/abstractive/checkpoint-1000`.
+`--resume-from-checkpoint artifacts/checkpoint-1000`.
 
 ### TensorBoard logging
 
@@ -57,7 +57,7 @@ integration. Run TensorBoard in a separate shell to monitor loss curves, ROUGE
 scores, and qualitative samples:
 
 ```bash
-tensorboard --logdir outputs/abstractive/runs
+tensorboard --logdir artifacts/runs
 ```
 
 Use `--logging-dir` to customize the event directory and `--report-to none` to
@@ -65,7 +65,7 @@ disable the integration entirely.
 
 ### Output artifacts
 
-- `outputs/abstractive/evaluation_report.json` – captures ROUGE scores, lead-N
+- `artifacts/evaluation_report.json` – captures ROUGE scores, lead-N
   baseline metrics, CLI arguments, and qualitative examples.
 - Model checkpoints and tokenizer files saved alongside the report, ready for
   inference or further fine-tuning.
@@ -75,4 +75,3 @@ disable the integration entirely.
 The report contains a short list of model vs. reference summaries taken from the
 evaluation split. Increase `--num-samples-for-report` for a larger qualitative
 slice, or inspect individual samples programmatically from the JSON file.
-

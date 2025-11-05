@@ -1,6 +1,6 @@
 # occlusion_loso.py
 # Usage:
-#   python scripts/occlusion_loso.py --model outputs/abstractive/checkpoint-XXXX --texts-file docs.txt --limit 5
+#   python scripts/occlusion_loso.py --model artifacts/checkpoint-XXXX --texts-file docs.txt --limit 5
 # Each line in docs.txt is a single source document; optionally add a tab + reference summary.
 
 import argparse, re, os, math
