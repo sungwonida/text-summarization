@@ -131,7 +131,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir",
-        default="outputs/abstractive",
+        default="artifacts",
         help="Directory where checkpoints and evaluation artifacts are stored.",
     )
     parser.add_argument(
