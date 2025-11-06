@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
+import os
 import random
 from pathlib import Path
 from typing import Dict, Mapping, Optional
@@ -12,7 +14,10 @@ import numpy as np
 import torch
 from torch.utils.data import Sampler
 from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
+from transformers.trainer import TRAINER_STATE_NAME
+from transformers.trainer_callback import ExportableState
 from transformers.trainer_pt_utils import find_batch_size
+from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, SaveStrategy
 
 from .config import TrainingConfig
 from .inspection import postprocess_text
@@ -55,7 +60,9 @@ class CappedSeq2SeqTrainer(Seq2SeqTrainer):
     def __init__(self, *args, max_train_samples_per_epoch: Optional[int] = None, **kwargs):
         self._max_train_samples_per_epoch = max_train_samples_per_epoch
         self._samples_seen_initialized = False
+        self._checkpoint_registry: Dict[int, str] = {}
         super().__init__(*args, **kwargs)
+        self._bootstrap_checkpoint_registry()
 
     def _get_train_sampler(self, *args, **kwargs):
         sampler = super()._get_train_sampler(*args, **kwargs)
@@ -123,6 +130,95 @@ class CappedSeq2SeqTrainer(Seq2SeqTrainer):
             previous = int(getattr(self.state, "samples_seen", 0) or 0)
             self.state.samples_seen = previous + total_samples
         return super().training_step(model, inputs, num_items_in_batch=num_items_in_batch)
+
+    # Hugging Face Trainer overrides -------------------------------------------------
+    def _bootstrap_checkpoint_registry(self) -> None:
+        run_dir = Path(getattr(self.args, "output_dir", ""))
+        if not run_dir.is_dir():
+            return
+
+        for checkpoint_dir in sorted(run_dir.glob(f"{PREFIX_CHECKPOINT_DIR}-*")):
+            state_path = checkpoint_dir / TRAINER_STATE_NAME
+            if not state_path.is_file():
+                continue
+            try:
+                with state_path.open("r", encoding="utf-8") as handle:
+                    state_payload = json.load(handle)
+            except Exception:
+                continue
+            step = state_payload.get("global_step")
+            if isinstance(step, int):
+                self._checkpoint_registry[int(step)] = str(checkpoint_dir)
+
+        best_step = getattr(self.state, "best_global_step", None)
+        if isinstance(best_step, int) and best_step in self._checkpoint_registry:
+            self.state.best_model_checkpoint = self._checkpoint_registry[best_step]
+
+    def _current_samples_seen(self) -> int:
+        samples_seen = getattr(self.state, "samples_seen", None)
+        if samples_seen is not None:
+            return int(samples_seen)
+
+        train_batch_size = getattr(self.state, "train_batch_size", None)
+        if train_batch_size is None:
+            train_batch_size = getattr(self.args, "train_batch_size", None)
+        if train_batch_size is None:
+            per_device = getattr(self.args, "per_device_train_batch_size", 1)
+            world_size = max(1, getattr(self.args, "world_size", 1))
+            train_batch_size = per_device * world_size
+
+        grad_accum = max(1, getattr(self.args, "gradient_accumulation_steps", 1))
+        global_step = int(getattr(self.state, "global_step", 0) or 0)
+        return int(global_step * grad_accum * train_batch_size)
+
+    def _save_checkpoint(self, model, trial):
+        checkpoint_suffix = self._current_samples_seen()
+        checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{checkpoint_suffix}"
+
+        if self.hp_search_backend is None and trial is None:
+            self.store_flos()
+
+        run_dir = self._get_output_dir(trial=trial)
+        output_dir = os.path.join(run_dir, checkpoint_folder)
+        self.save_model(output_dir, _internal_call=True)
+
+        current_step = int(getattr(self.state, "global_step", 0) or 0)
+        self._checkpoint_registry[current_step] = output_dir
+
+        best_step = getattr(self.state, "best_global_step", None)
+        if isinstance(best_step, int):
+            if best_step == current_step:
+                self.state.best_model_checkpoint = output_dir
+            elif best_step in self._checkpoint_registry:
+                self.state.best_model_checkpoint = self._checkpoint_registry[best_step]
+
+        if self.args.save_strategy in [SaveStrategy.STEPS, SaveStrategy.EPOCH] and self.state.best_global_step:
+            best_checkpoint_dir = self.state.best_model_checkpoint
+            if best_checkpoint_dir and os.path.exists(best_checkpoint_dir):
+                self.state.best_model_checkpoint = best_checkpoint_dir
+
+        if not self.args.save_only_model:
+            self._save_optimizer_and_scheduler(output_dir)
+            self._save_scaler(output_dir)
+            self._save_rng_state(output_dir)
+
+        if self.args.should_save:
+            for cb in [
+                cb for cb in self.callback_handler.callbacks + [self.control] if isinstance(cb, ExportableState)
+            ]:
+                cb_name = cb.__class__.__name__
+                cb_state = cb.state()
+                if isinstance(self.state.stateful_callbacks[cb_name], list):
+                    self.state.stateful_callbacks[cb_name].append(cb_state)
+                else:
+                    self.state.stateful_callbacks[cb_name] = cb_state
+            self.state.save_to_json(os.path.join(output_dir, TRAINER_STATE_NAME))
+
+        if self.args.push_to_hub:
+            self._push_from_checkpoint(output_dir)
+
+        if self.args.should_save:
+            self._rotate_checkpoints(use_mtime=True, output_dir=run_dir)
 
 
 def build_training_arguments(config: TrainingConfig, output_dir: Path) -> Seq2SeqTrainingArguments:
