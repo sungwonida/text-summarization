@@ -284,7 +284,11 @@ class SampleCountLoggingCallback(TrainerCallback):
             if prefix in {"train", "eval", "test"} and remainder:
                 return f"{prefix}/{remainder}"
 
-        return tag
+        default_train_tags = {"loss", "learning_rate", "grad_norm", "epoch", "total_flos"}
+        if tag in default_train_tags:
+            return f"train/{tag}"
+
+        return f"train/{tag}"
 
     def on_log(self, args, state, control, logs=None, **kwargs):  # noqa: D401 - HF callback signature
         if self.summary_writer is None or not logs:
