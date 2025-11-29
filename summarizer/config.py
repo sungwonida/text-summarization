@@ -309,7 +309,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sample-inspection-mode",
         choices=["off", "debug_path", "tensorboard"],
-        default="debug_path",
+        default="off",
         help=(
             "Control how good/bad training samples are dropped for inspection. "
             "Use 'debug_path' (default) to write artifacts to disk, 'tensorboard' to log them "

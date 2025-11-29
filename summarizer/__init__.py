@@ -12,6 +12,7 @@ from .datasets import (
 from .inspection import (
     collect_samples_for_inspection,
     save_inspection_artifacts,
+    temporary_attention_backend,
 )
 from .logging_utils import configure_logging, record_cli_invocation, tensorboard_writer_context
 from .runtime import get_device, seed_everything
@@ -32,6 +33,7 @@ __all__ = [
     "get_device",
     "infer_columns",
     "lead_n",
+    "temporary_attention_backend",
     "seed_everything",
     "parse_training_args",
     "preprocess_function",

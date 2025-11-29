@@ -49,6 +49,7 @@ from summarizer import (
     record_cli_invocation,
     seed_everything,
     save_inspection_artifacts,
+    temporary_attention_backend,
     tensorboard_writer_context,
 )
 
@@ -286,7 +287,12 @@ def main():
         eval_metrics: Optional[Dict[str, float]] = None
         if eval_split is not None:
             LOGGER.info("Running evaluation")
-            eval_metrics = trainer.evaluate(eval_dataset=eval_split, max_length=config.val_max_target_length)
+            evaluation_attention_backend = "eager" if inspection_enabled else None
+            with temporary_attention_backend(model, evaluation_attention_backend):
+                eval_metrics = trainer.evaluate(
+                    eval_dataset=eval_split,
+                    max_length=config.val_max_target_length,
+                )
             LOGGER.info("Evaluation metrics: %s", eval_metrics)
         else:
             LOGGER.warning("No evaluation split found; skipping evaluation")

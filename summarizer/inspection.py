@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -16,6 +17,36 @@ from .config import TrainingConfig
 from .datasets import ColumnMapping, lead_n
 
 LOGGER = logging.getLogger(__name__)
+
+
+@contextmanager
+def temporary_attention_backend(model, backend: Optional[str]):
+    """Temporarily switch the model's attention backend."""
+
+    if not backend:
+        yield
+        return
+
+    previous_model_backend = getattr(model, "_attn_implementation", None)
+    previous_config_backend = getattr(model.config, "_attn_implementation", None)
+
+    model._attn_implementation = backend
+    model.config._attn_implementation = backend
+
+    try:
+        yield
+    finally:
+        if previous_model_backend is None:
+            if hasattr(model, "_attn_implementation"):
+                delattr(model, "_attn_implementation")
+        else:
+            model._attn_implementation = previous_model_backend
+
+        if previous_config_backend is None:
+            if hasattr(model.config, "_attn_implementation"):
+                delattr(model.config, "_attn_implementation")
+        else:
+            model.config._attn_implementation = previous_config_backend
 
 
 def postprocess_text(preds: Iterable[str], labels: Iterable[str]) -> Tuple[List[str], List[str]]:
@@ -370,7 +401,9 @@ def inspect_dataset_sample(
     )
     device_inputs = {k: v.to(device) for k, v in encoded_inputs.items()}
 
-    with torch.no_grad():
+    attention_backend = "eager" if inspection_enabled else None
+
+    with temporary_attention_backend(model, attention_backend), torch.no_grad():
         generation = model.generate(
             **device_inputs,
             max_length=config.val_max_target_length,
@@ -387,13 +420,14 @@ def inspect_dataset_sample(
     primary_score = None
 
     if inspection_enabled:
-        attention_details = extract_attention_details(
-            model,
-            tokenizer,
-            encoded_inputs,
-            device_inputs,
-            generated_ids,
-        )
+        with temporary_attention_backend(model, attention_backend):
+            attention_details = extract_attention_details(
+                model,
+                tokenizer,
+                encoded_inputs,
+                device_inputs,
+                generated_ids,
+            )
         lead_summary, metrics = compute_sample_quality_metrics(
             rouge_metric=rouge_metric,
             bertscore_metric=bertscore_metric,
